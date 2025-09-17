@@ -477,8 +477,8 @@ document.getElementById('exportRulesBtn').addEventListener('click', exportRules)
 // document.getElementById('importLatestRulesBtn').addEventListener('click', importLatestRules);
 document.getElementById('exportTotalsBtn').addEventListener('click', exportTotals);
 document.getElementById('importRulesBtn').addEventListener('click', () => document.getElementById('importRulesInput').click());
-//document.getElementById('importRulesInput').addEventListener('change', (e) => {
- // const f = e.target.files && e.target.files[0]; if (f) importRulesFromFile(f);
+document.getElementById('importRulesInput').addEventListener('change', (e) => {
+   const f = e.target.files && e.target.files[0]; if (f) importRulesFromFile(f);
 });
 document.getElementById('clearFilterBtn').addEventListener('click', () => {
   CURRENT_FILTER = null; try { localStorage.removeItem(LS_KEYS.FILTER); } catch {}
