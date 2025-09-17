@@ -1,5 +1,5 @@
-// SpendLite v6.6.27 – Month filter + export respects selected month
-// Keeps: UCASE categories, jolly theme, import/export rules, category filter, VISA- keyword, tabs export + grand total
+// SpendLite V1 (clean wiring) — fixes: defensive event binding, no double listeners, removed obsolete IDs
+// Keeps: CSV load, month filter, category totals export, rules import/export, PayPal next-word logic, collapse + pager
 
 const COL = { DATE: 2, DEBIT: 5, LONGDESC: 9 }; // 0-based mapping for 10-col export
 
@@ -26,8 +26,7 @@ function forFilename(label) {
   return String(label).replace(/\s+/g, '_');
 }
 
-
-const LS_KEYS = { RULES: 'spendlite_rules_v6626', FILTER: 'spendlite_filter_v6626', MONTH: 'spendlite_month_v6627', TXNS_COLLAPSED: 'spendlite_txns_collapsed_v7' };
+const LS_KEYS = { RULES: 'spendlite_rules_v6626', FILTER: 'spendlite_filter_v6626', MONTH: 'spendlite_month_v6627', TXNS_COLLAPSED: 'spendlite_txns_collapsed_v7', TXNS_JSON: 'spendlite_txns_json_v7' };
 
 function toTitleCase(str) {
   if (!str) return '';
@@ -68,22 +67,17 @@ function loadCsvText(csvText) {
 // --- Date helpers
 function parseDateSmart(s) {
   if (!s) return null;
-  // Try native
   let d = new Date(s);
   if (!isNaN(d)) return d;
 
-  // Try DD/MM/YYYY or MM/DD/YYYY
   const m1 = String(s).trim().match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/);
   if (m1) {
     const a = +m1[1], b = +m1[2], y = +m1[3];
-    // Heuristic: if first > 12 it's DD/MM/YYYY, else assume DD/MM (AU style)
     const day = a > 12 ? a : b > 12 ? b : a; // prefer AU
     const month = a > 12 ? b : a;            // prefer AU
     return new Date(y, month - 1, day);
   }
 
-  // Handle Qudos format e.g. "12:00am Mon 1 September, 2025"
-  // Strip leading time if present
   const s2 = String(s).replace(/^\d{1,2}:\d{2}\s*(am|pm)\s*/i, '');
   const m2 = s2.match(/^(Mon|Tue|Wed|Thu|Fri|Sat|Sun)?\s*(\d{1,2})\s+(January|February|March|April|May|June|July|August|September|October|November|December),?\s+(\d{4})/i);
   if (m2) {
@@ -94,7 +88,6 @@ function parseDateSmart(s) {
     const mi = monthMap[monthName];
     if (mi != null) return new Date(y, mi, day);
   }
-
   return null;
 }
 function yyyymm(d) { return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`; }
@@ -109,6 +102,7 @@ function getFirstTxnMonth(txns = CURRENT_TXNS) {
 // Build month list for dropdown
 function rebuildMonthDropdown() {
   const sel = document.getElementById('monthFilter');
+  if (!sel) return;
   const months = new Set();
   for (const t of CURRENT_TXNS) {
     const d = parseDateSmart(t.date);
@@ -160,7 +154,7 @@ function categorise(txns, rules) {
 function computeCategoryTotals(txns) {
   const byCat = new Map();
   for (const t of txns) {
-    const cat = (t.category || 'UNCATEGORISED').toUpperCase(); const displayCat = toTitleCase(cat);
+    const cat = (t.category || 'UNCATEGORISED').toUpperCase();
     byCat.set(cat, (byCat.get(cat) || 0) + t.amount);
   }
   const rows = [...byCat.entries()].sort((a,b) => b[1]-a[1]);
@@ -171,14 +165,15 @@ function computeCategoryTotals(txns) {
 function renderCategoryTotals(txns) {
   const { rows, grand } = computeCategoryTotals(txns);
   const totalsDiv = document.getElementById('categoryTotals');
+  if (!totalsDiv) return;
   let html = '<table class="cats"><colgroup><col class="col-cat"><col class="col-total"><col class="col-pct"></colgroup><thead><tr><th>Category</th><th class="num">Total</th><th class="num">%</th></tr></thead><tbody>';
   for (const [cat, total] of rows) {
     html += `<tr>
-      <td><a class="catlink" data-cat="${escapeHtml(cat)}"><span class=\"category-name\">${escapeHtml(toTitleCase(cat))}</span></a></td>
-      <td class=\"num\">${total.toFixed(2)}</td><td class=\"num\">${(grand ? (total / grand * 100) : 0).toFixed(1)}%</td>
+      <td><a class="catlink" data-cat="${escapeHtml(cat)}"><span class="category-name">${escapeHtml(toTitleCase(cat))}</span></a></td>
+      <td class="num">${total.toFixed(2)}</td><td class="num">${(grand ? (total / grand * 100) : 0).toFixed(1)}%</td>
     </tr>`;
   }
-  html += `</tbody><tfoot><tr><td>Total</td><td class=\"num\">${grand.toFixed(2)}</td><td class=\"num\">100%</td></tr></tfoot></table>`;
+  html += `</tbody><tfoot><tr><td>Total</td><td class="num">${grand.toFixed(2)}</td><td class="num">100%</td></tr></tfoot></table>`;
   totalsDiv.innerHTML = html;
 
   totalsDiv.querySelectorAll('a.catlink').forEach(a => {
@@ -191,10 +186,7 @@ function renderCategoryTotals(txns) {
   });
 }
 
-
-
 function renderMonthTotals() {
-  // Use the same filtered set as the transactions table
   const txns = getFilteredTxns(monthFilteredTxns());
   let debit = 0, credit = 0, count = 0;
   for (const t of txns) {
@@ -205,8 +197,7 @@ function renderMonthTotals() {
   const net = debit - credit;
   const el = document.getElementById('monthTotals');
   if (el) {
-    const label = friendlyMonthOrAll(MONTH_FILTER);
-    const cat = CURRENT_FILTER ? ` + category \"${CURRENT_FILTER}\"` : "";
+    const cat = CURRENT_FILTER ? ` + category "${CURRENT_FILTER}"` : "";
     el.innerHTML = `Showing <span class="badge">${count}</span> transactions for <strong>${friendlyMonthOrAll(MONTH_FILTER)}${cat}</strong> · ` +
                    `Debit: <strong>$${debit.toFixed(2)}</strong> · ` +
                    `Credit: <strong>$${credit.toFixed(2)}</strong> · ` +
@@ -214,18 +205,20 @@ function renderMonthTotals() {
   }
 }
 
-function applyRulesAndRender() { CURRENT_PAGE = 1;
-  CURRENT_RULES = parseRules(document.getElementById('rulesBox').value);
-  try { localStorage.setItem(LS_KEYS.RULES, document.getElementById('rulesBox').value); } catch {}
+function applyRulesAndRender() {
+  CURRENT_PAGE = 1;
+  const box = document.getElementById('rulesBox');
+  CURRENT_RULES = parseRules(box ? box.value : '');
+  try { localStorage.setItem(LS_KEYS.RULES, box ? box.value : ''); } catch {}
   const txns = monthFilteredTxns();
   categorise(txns, CURRENT_RULES);
   renderMonthTotals();
   renderCategoryTotals(txns);
   renderTransactionsTable(txns);
+  renderTotalsBar(txns);
   saveTxnsToLocalStorage();
   try { updateMonthBanner(); } catch {}
 }
-
 
 function computeDebitCredit(txns) {
   let sumDebit = 0, sumCredit = 0;
@@ -244,36 +237,12 @@ function renderTotalsBar(txns) {
   el.innerHTML = `Rows: <strong>${txns.length}</strong> · Debit: <strong>$${sumDebit.toFixed(2)}</strong> · Credit: <strong>$${sumCredit.toFixed(2)}</strong> · Net: <strong>$${net.toFixed(2)}</strong> (${monthLabel})`;
 }
 
-
-function exportTotalsold() {
-  const txns = monthFilteredTxns();
-  const { rows, grand } = computeCategoryTotals(txns);
-  // Always use a friendly label like "August 2025" for both header and filename
-  const labelFriendly = friendlyMonthOrAll(MONTH_FILTER || getFirstTxnMonth(txns) || new Date().toISOString().slice(0,10));
-  const header = `SpendLite Category Totals (${labelFriendly})`;
-  const lines = [header, '='.repeat(header.length)];
-  lines.push("Category\tAmount\t%");
-  for (const [cat, total] of rows) {
-    const pct = grand !== 0 ? (total / grand * 100) : 0;
-    lines.push(`${cat}\t${total.toFixed(2)}\t${pct.toFixed(1)}%`);
-  }
-  lines.push('', `TOTAL\t${grand.toFixed(2)}\t100%`);
-  const blob = new Blob([lines.join('\\n')], {type: 'text/plain'});
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = `category_totals_${forFilename(labelFriendly)}.txt`;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-}
 function exportTotals() {
   const txns = monthFilteredTxns();
   const { rows, grand } = computeCategoryTotals(txns);
-
   const label = friendlyMonthOrAll(MONTH_FILTER || getFirstTxnMonth(txns) || new Date());
   const header = `SpendLite Category Totals (${label})`;
 
-  // dynamic widths for neat alignment
   const catWidth = Math.max(8, ...rows.map(([cat]) => toTitleCase(cat).length), 'Category'.length);
   const amtWidth = 12;
   const pctWidth = 6;
@@ -281,27 +250,14 @@ function exportTotals() {
   const lines = [];
   lines.push(header);
   lines.push('='.repeat(header.length));
-  lines.push(
-    'Category'.padEnd(catWidth) + ' ' +
-    'Amount'.padStart(amtWidth) + ' ' +
-    '%'.padStart(pctWidth)
-  );
+  lines.push('Category'.padEnd(catWidth) + ' ' + 'Amount'.padStart(amtWidth) + ' ' + '%'.padStart(pctWidth));
 
   for (const [cat, total] of rows) {
     const pct = grand ? (total / grand * 100) : 0;
-    lines.push(
-      toTitleCase(cat).padEnd(catWidth) + ' ' +
-      total.toFixed(2).padStart(amtWidth) + ' ' +
-      (pct.toFixed(1) + '%').padStart(pctWidth)
-    );
+    lines.push(toTitleCase(cat).padEnd(catWidth) + ' ' + total.toFixed(2).padStart(amtWidth) + ' ' + (pct.toFixed(1) + '%').padStart(pctWidth));
   }
-
   lines.push('');
-  lines.push(
-    'TOTAL'.padEnd(catWidth) + ' ' +
-    grand.toFixed(2).padStart(amtWidth) + ' ' +
-    '100%'.padStart(pctWidth)
-  );
+  lines.push('TOTAL'.padEnd(catWidth) + ' ' + grand.toFixed(2).padStart(amtWidth) + ' ' + '100%'.padStart(pctWidth));
 
   const blob = new Blob([lines.join('\n')], { type: 'text/plain' });
   const a = document.createElement('a');
@@ -312,60 +268,15 @@ function exportTotals() {
   a.remove();
 }
 
-
-function getFilteredTxns(txns) {
-  if (!CURRENT_FILTER) return txns;
-  return txns.filter(t => (t.category || 'UNCATEGORISED').toUpperCase() === CURRENT_FILTER);
-}
-
-function updateFilterUI() {
-  const label = document.getElementById('activeFilter');
-  const btn = document.getElementById('clearFilterBtn');
-  if (CURRENT_FILTER) { label.textContent = `— filtered by \"${CURRENT_FILTER}\"`; btn.style.display = ''; }
-  else { label.textContent = ''; btn.style.display = 'none'; }
-}
-
-function updateMonthBanner() {
-  const banner = document.getElementById('monthBanner');
-  const label = friendlyMonthOrAll(MONTH_FILTER);
-  banner.textContent = `— ${label}`;
-}
-
-function renderTransactionsTable(txns = monthFilteredTxns()) {
-  const filtered = getFilteredTxns(txns);
-  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
-  if (CURRENT_PAGE > totalPages) CURRENT_PAGE = totalPages;
-  if (CURRENT_PAGE < 1) CURRENT_PAGE = 1;
-  const start = (CURRENT_PAGE - 1) * PAGE_SIZE;
-  const pageItems = filtered.slice(start, start + PAGE_SIZE);
-  const table = document.getElementById('transactionsTable');
-  let html = '<tr><th>Date</th><th>Amount</th><th>Category</th><th>Description</th><th></th></tr>';
-  pageItems.forEach((t) => {
-    const idx = CURRENT_TXNS.indexOf(t);
-    const cat = (t.category || 'UNCATEGORISED').toUpperCase(); const displayCat = toTitleCase(cat);
-    html += `<tr>
-      <td>${escapeHtml(t.date)}</td>
-      <td>${t.amount.toFixed(2)}</td>
-      <td><span class=\"category-name\">${escapeHtml(displayCat)}</span></td>
-      <td>${escapeHtml(t.description)}</td>
-      <td><button class="rule-btn" onclick="assignCategory(${idx})">+</button></td>
-    </tr>`;
-  });
-  table.innerHTML = html;
-  renderPager(totalPages);
-}
-
 // --- helper: get next word after a marker (e.g., "paypal")
 function nextWordAfter(marker, desc) {
   const lower = (desc || '').toLowerCase();
   const i = lower.indexOf(String(marker).toLowerCase());
   if (i === -1) return '';
-  // slice after the marker, trim separators like space, dash, colon, slash, asterisk
   let after = (desc || '').slice(i + String(marker).length).replace(/^[\s\-:\/*]+/, '');
-  const m = after.match(/^([A-Za-z0-9&._]+)/); // merchant-like token
+  const m = after.match(/^([A-Za-z0-9&._]+)/);
   return m ? m[1] : '';
 }
-
 
 function assignCategory(idx) {
   const txn = CURRENT_TXNS[idx];
@@ -373,7 +284,6 @@ function assignCategory(idx) {
   const desc = txn.description || "";
   const up = desc.toUpperCase();
 
-  // Build a suggested keyword
   let suggestedKeyword = "";
   if (/\bPAYPAL\b/.test(up)) {
     const nxt = nextWordAfter('paypal', desc);
@@ -388,20 +298,17 @@ function assignCategory(idx) {
     }
   }
 
-  // Let user confirm/edit keyword
   const keywordInput = prompt("Enter keyword to match:", suggestedKeyword);
   if (!keywordInput) return;
   const keyword = keywordInput.trim().toUpperCase();
 
-  // Let user choose/add category (no automation)
   const defaultCat = (txn.category || "UNCATEGORISED").toUpperCase();
   const catInput = prompt("Enter category name:", defaultCat);
   if (!catInput) return;
   const category = catInput.trim().toUpperCase();
 
-  // Upsert into rulesBox
   const box = document.getElementById('rulesBox');
-  const lines = String(box.value || "").split(/\r?\n/);
+  const lines = String(box ? box.value : "").split(/\\r?\\n/);
   let updated = false;
   for (let i = 0; i < lines.length; i++) {
     const line = (lines[i] || "").trim();
@@ -417,35 +324,18 @@ function assignCategory(idx) {
     }
   }
   if (!updated) lines.push(`${keyword} => ${category}`);
-  box.value = lines.join("\n");
-  try { localStorage.setItem(LS_KEYS.RULES, box.value); } catch {}
+  if (box) box.value = lines.join("\\n");
+  try { localStorage.setItem(LS_KEYS.RULES, box ? box.value : ''); } catch {}
   if (typeof applyRulesAndRender === 'function') applyRulesAndRender();
 }
 
-
-
-// Step 1: Safe import of latest rules from rules.txt (no other behavior changed)
-async function importLatestRules() {
-  try {
-    const res = await fetch('rules.txt?ts=' + Date.now(), { cache: 'no-store' });
-    if (!res.ok) throw new Error('HTTP ' + res.status);
-    const text = await res.text();
-    const box = document.getElementById('rulesBox');
-    box.value = text;
-    try { localStorage.setItem(LS_KEYS.RULES, text); } catch {}
-    if (typeof applyRulesAndRender === 'function') {
-      applyRulesAndRender();
-    }
-  } catch (e) {
-    alert('Could not load rules.txt — ' + (e && e.message ? e.message : 'unknown error'));
-  }
-}
+// Import/export rules
 function exportRules() {
-  const text = document.getElementById('rulesBox').value || '';
+  const text = (document.getElementById('rulesBox')?.value) || '';
   const blob = new Blob([text], {type: 'text/plain'});
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  a.download = 'rules_export.txt';
+  a.download = 'rules.txt'; // unified filename
   document.body.appendChild(a);
   a.click();
   a.remove();
@@ -455,7 +345,8 @@ function importRulesFromFile(file) {
   const reader = new FileReader();
   reader.onload = () => {
     const text = reader.result || '';
-    document.getElementById('rulesBox').value = text;
+    const box = document.getElementById('rulesBox');
+    if (box) box.value = text;
     applyRulesAndRender();
   };
   reader.readAsText(file);
@@ -465,48 +356,59 @@ function escapeHtml(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#039;');
 }
 
-// UI wiring
-document.getElementById('csvFile').addEventListener('change', (e) => {
-  const file = e.target.files?.[0]; if (!file) return;
-  const reader = new FileReader();
-  reader.onload = () => { loadCsvText(reader.result); };
-  reader.readAsText(file);
-});
-// document.getElementById('recalculateBtn').addEventListener('click', applyRulesAndRender);
-document.getElementById('exportRulesBtn').addEventListener('click', exportRules);
-// document.getElementById('importLatestRulesBtn').addEventListener('click', importLatestRules);
-document.getElementById('exportTotalsBtn').addEventListener('click', exportTotals);
-document.getElementById('importRulesBtn').addEventListener('click', () => document.getElementById('importRulesInput').click());
-document.getElementById('importRulesInput').addEventListener('change', (e) => {
-   const f = e.target.files && e.target.files[0]; if (f) importRulesFromFile(f);
-});
-document.getElementById('clearFilterBtn').addEventListener('click', () => {
-  CURRENT_FILTER = null; try { localStorage.removeItem(LS_KEYS.FILTER); } catch {}
-  updateFilterUI(); CURRENT_PAGE = 1; renderTransactionsTable(); renderMonthTotals(monthFilteredTxns());
-});
-document.getElementById('clearMonthBtn').addEventListener('click', () => {
-  MONTH_FILTER = ""; try { localStorage.removeItem(LS_KEYS.MONTH); } catch {}
-  document.getElementById('monthFilter').value = "";
-  updateMonthBanner();
-  CURRENT_PAGE = 1;
-  applyRulesAndRender();
-});
-document.getElementById('monthFilter').addEventListener('change', (e) => {
-  MONTH_FILTER = e.target.value || "";
-  try { localStorage.setItem(LS_KEYS.MONTH, MONTH_FILTER); } catch {}
-  updateMonthBanner();
-  CURRENT_PAGE = 1;
-  applyRulesAndRender();
-});
+// ---------- Safe event wiring ----------
+function bind(id, evt, handler) {
+  const el = document.getElementById(id);
+  if (el) el.addEventListener(evt, handler);
+  // else console.warn('Skipped binding: #' + id);
+}
 
-window.addEventListener('DOMContentLoaded', async () => {
+document.addEventListener('DOMContentLoaded', () => {
+  // Wiring
+  bind('csvFile', 'change', (e) => {
+    const file = e.target.files?.[0]; if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => { loadCsvText(reader.result); };
+    reader.readAsText(file);
+  });
+  bind('exportTotalsBtn', 'click', exportTotals);
+  bind('exportRulesBtn', 'click', exportRules);
+  bind('importRulesBtn', 'click', () => document.getElementById('importRulesInput')?.click());
+  bind('importRulesInput', 'change', (e) => {
+    const f = e.target.files && e.target.files[0]; if (f) importRulesFromFile(f);
+  });
+  bind('clearFilterBtn', 'click', () => {
+    CURRENT_FILTER = null; try { localStorage.removeItem(LS_KEYS.FILTER); } catch {}
+    updateFilterUI(); CURRENT_PAGE = 1; renderTransactionsTable(); renderMonthTotals(monthFilteredTxns());
+  });
+  bind('clearMonthBtn', 'click', () => {
+    MONTH_FILTER = ""; try { localStorage.removeItem(LS_KEYS.MONTH); } catch {}
+    const sel = document.getElementById('monthFilter'); if (sel) sel.value = "";
+    updateMonthBanner();
+    CURRENT_PAGE = 1;
+    applyRulesAndRender();
+  });
+  bind('monthFilter', 'change', (e) => {
+    MONTH_FILTER = e.target.value || "";
+    try { localStorage.setItem(LS_KEYS.MONTH, MONTH_FILTER); } catch {}
+    updateMonthBanner();
+    CURRENT_PAGE = 1;
+    applyRulesAndRender();
+  });
+
   // Restore rules
   let restored = false;
-  try { const saved = localStorage.getItem(LS_KEYS.RULES); if (saved && saved.trim()) { document.getElementById('rulesBox').value = saved; restored = true; } } catch {}
+  try {
+    const saved = localStorage.getItem(LS_KEYS.RULES);
+    if (saved && saved.trim()) { const box = document.getElementById('rulesBox'); if (box) box.value = saved; restored = true; }
+  } catch {}
   if (!restored) {
-    try { const res = await fetch('rules.txt'); const text = await res.text(); document.getElementById('rulesBox').value = text; restored = true; } catch {}
+    try { fetch('rules.txt').then(r => r.text()).then(text => { const box = document.getElementById('rulesBox'); if (box) box.value = text; applyRulesAndRender(); }); restored = true; } catch {}
   }
-  if (!restored) document.getElementById('rulesBox').value = SAMPLE_RULES;
+  if (!restored) {
+    const box = document.getElementById('rulesBox');
+    if (box) box.value = SAMPLE_RULES;
+  }
 
   // Restore filters
   try { const savedFilter = localStorage.getItem(LS_KEYS.FILTER); CURRENT_FILTER = savedFilter && savedFilter.trim() ? savedFilter.toUpperCase() : null; } catch {}
@@ -514,6 +416,8 @@ window.addEventListener('DOMContentLoaded', async () => {
 
   updateFilterUI(); CURRENT_PAGE = 1;
   updateMonthBanner();
+  applyTxnsCollapsedUI();
+  renderTotalsBar(monthFilteredTxns());
 });
 
 const SAMPLE_RULES = `# Rules format: KEYWORD => CATEGORY
@@ -545,10 +449,49 @@ function toggleTransactions() {
   setTxnsCollapsed(!collapsed);
   applyTxnsCollapsedUI();
 }
-document.addEventListener('DOMContentLoaded', () => {
-  applyTxnsCollapsedUI();
-});
 
+function renderTransactionsTable(txns = monthFilteredTxns()) {
+  const filtered = getFilteredTxns(txns);
+  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  if (CURRENT_PAGE > totalPages) CURRENT_PAGE = totalPages;
+  if (CURRENT_PAGE < 1) CURRENT_PAGE = 1;
+  const start = (CURRENT_PAGE - 1) * PAGE_SIZE;
+  const pageItems = filtered.slice(start, start + PAGE_SIZE);
+  const table = document.getElementById('transactionsTable');
+  if (!table) return;
+  let html = '<tr><th>Date</th><th>Amount</th><th>Category</th><th>Description</th><th></th></tr>';
+  pageItems.forEach((t) => {
+    const idx = CURRENT_TXNS.indexOf(t);
+    const cat = (t.category || 'UNCATEGORISED').toUpperCase();
+    html += `<tr>
+      <td>${escapeHtml(t.date)}</td>
+      <td>${t.amount.toFixed(2)}</td>
+      <td><span class="category-name">${escapeHtml(toTitleCase(cat))}</span></td>
+      <td>${escapeHtml(t.description)}</td>
+      <td><button class="rule-btn" onclick="assignCategory(${idx})">+</button></td>
+    </tr>`;
+  });
+  table.innerHTML = html;
+  renderPager(totalPages);
+}
+
+function getFilteredTxns(txns) {
+  if (!CURRENT_FILTER) return txns;
+  return txns.filter(t => (t.category || 'UNCATEGORISED').toUpperCase() === CURRENT_FILTER);
+}
+
+function updateFilterUI() {
+  const label = document.getElementById('activeFilter');
+  const btn = document.getElementById('clearFilterBtn');
+  if (label) label.textContent = CURRENT_FILTER ? `— filtered by "${CURRENT_FILTER}"` : '';
+  if (btn) btn.style.display = CURRENT_FILTER ? '' : 'none';
+}
+
+function updateMonthBanner() {
+  const banner = document.getElementById('monthBanner');
+  const label = friendlyMonthOrAll(MONTH_FILTER);
+  if (banner) banner.textContent = `— ${label}`;
+}
 
 function renderPager(totalPages) {
   const pager = document.getElementById('pager');
@@ -601,7 +544,6 @@ function renderPager(totalPages) {
   }
 }
 
-
 function saveTxnsToLocalStorage(){
   try {
     const data = JSON.stringify(CURRENT_TXNS||[]);
@@ -612,87 +554,7 @@ function saveTxnsToLocalStorage(){
   } catch {}
 }
 
-// Ensure banner shows a friendly label on load
-document.addEventListener('DOMContentLoaded', () => { try { updateMonthBanner(); } catch (e) {} });
-
-// Save transactions right before leaving the page (safety net when switching to Advanced)
+// Save transactions before leaving (safety net when switching to Advanced)
 window.addEventListener('beforeunload', () => {
   try { localStorage.setItem(LS_KEYS.TXNS_JSON, JSON.stringify(CURRENT_TXNS||[])); } catch {}
 });
-document.getElementById('exportTotalsBtn')
-  .addEventListener('click', exportTotals);
-
-
-// ==== SpendLite rules local-latest patch v1 ====
-(function() {
-  if (window.__rulesLocalLatestPatched) return;
-  window.__rulesLocalLatestPatched = true;
-
-  const RULES_KEY = 'SpendLite_rules_latest_v1';
-
-  function setStatus(elId, msg) {
-    var el = document.getElementById(elId);
-    if (el) el.textContent = msg;
-  }
-
-  function exportRules() {
-    var box = document.getElementById('rulesBox');
-    var text = box ? (box.value || '') : '';
-    try { localStorage.setItem(RULES_KEY, text); } catch (e) { console.warn('LocalStorage save failed', e); }
-    var blob = new Blob([text], { type: 'text/plain' });
-    var url = URL.createObjectURL(blob);
-    var a = document.createElement('a');
-    a.href = url;
-    a.download = 'rules.txt'; // filename you requested
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(url);
-    setStatus('rulesStatus', 'Exported rules.txt');
-  }
-  window.exportRules = window.exportRules || exportRules;
-
-  function importLatestRules() {
-    var saved = localStorage.getItem(RULES_KEY);
-    if (!saved) {
-      alert('No saved rules yet. Export once, or use Import rules from file.');
-      return;
-    }
-    var box = document.getElementById('rulesBox');
-    if (box) box.value = saved;
-    setStatus('rulesStatus', 'Imported latest (local)');
-    if (typeof recalculateTotals === 'function') try { recalculateTotals(); } catch(e) {}
-  }
-  window.importLatestRules = window.importLatestRules || importLatestRules;
-
-  // Keep LocalStorage in sync when user edits the rules box
-  window.addEventListener('load', function() {
-    var box = document.getElementById('rulesBox');
-    if (box) {
-      box.addEventListener('blur', function() {
-        try { localStorage.setItem(RULES_KEY, box.value || ''); } catch(e) {}
-      });
-    }
-
-    // Wire buttons by id if present
-    var expBtn = document.getElementById('exportRulesBtn');
-    if (expBtn && !expBtn.__patched) { expBtn.addEventListener('click', function() { exportRules(); }); expBtn.__patched = true; }
-    var impLatestBtn = document.getElementById('importLatestRulesBtn');
-    if (impLatestBtn && !impLatestBtn.__patched) { impLatestBtn.addEventListener('click', function() { importLatestRules(); }); impLatestBtn.__patched = true; }
-
-    // Fallback: find buttons by text content
-    function findBtnByText(txt) {
-      var btns = document.querySelectorAll('button');
-      for (var i=0;i<btns.length;i++) {
-        var t = (btns[i].innerText || btns[i].textContent || '').trim().toLowerCase();
-        if (t === txt.toLowerCase()) return btns[i];
-      }
-      return null;
-    }
-    var expAlt = findBtnByText('export rules') || findBtnByText('export rules (.txt)') || findBtnByText('export rules txt') || null;
-    if (expAlt && !expAlt.__patched) { expAlt.addEventListener('click', function(e) { e.preventDefault(); exportRules(); }); expAlt.__patched = true; }
-    var impAlt = findBtnByText('import latest') || findBtnByText('import latest rules') || null;
-    if (impAlt && !impAlt.__patched) { impAlt.addEventListener('click', function(e) { e.preventDefault(); importLatestRules(); }); impAlt.__patched = true; }
-  });
-})();
-// ==== SpendLite rules local-latest patch v1 ==== END
