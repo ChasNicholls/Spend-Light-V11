@@ -472,13 +472,13 @@ document.getElementById('csvFile').addEventListener('change', (e) => {
   reader.onload = () => { loadCsvText(reader.result); };
   reader.readAsText(file);
 });
-document.getElementById('recalculateBtn').addEventListener('click', applyRulesAndRender);
+// document.getElementById('recalculateBtn').addEventListener('click', applyRulesAndRender);
 document.getElementById('exportRulesBtn').addEventListener('click', exportRules);
-document.getElementById('importLatestRulesBtn').addEventListener('click', importLatestRules);
+// document.getElementById('importLatestRulesBtn').addEventListener('click', importLatestRules);
 document.getElementById('exportTotalsBtn').addEventListener('click', exportTotals);
 document.getElementById('importRulesBtn').addEventListener('click', () => document.getElementById('importRulesInput').click());
-document.getElementById('importRulesInput').addEventListener('change', (e) => {
-  const f = e.target.files && e.target.files[0]; if (f) importRulesFromFile(f);
+//document.getElementById('importRulesInput').addEventListener('change', (e) => {
+ // const f = e.target.files && e.target.files[0]; if (f) importRulesFromFile(f);
 });
 document.getElementById('clearFilterBtn').addEventListener('click', () => {
   CURRENT_FILTER = null; try { localStorage.removeItem(LS_KEYS.FILTER); } catch {}
